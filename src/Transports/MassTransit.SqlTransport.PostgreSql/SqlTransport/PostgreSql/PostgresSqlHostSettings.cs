@@ -57,7 +57,6 @@ namespace MassTransit.SqlTransport.PostgreSql
 
                 Username = builder.Username;
                 Password = builder.Password;
-
                 _builder = builder;
             }
         }
@@ -74,7 +73,11 @@ namespace MassTransit.SqlTransport.PostgreSql
                 Host = MultipleHosts ?? Host,
                 Username = Username,
                 Password = Password,
-                Database = Database
+                Database = Database,
+                KeepAlive = 5,
+                Pooling = true,
+                MinPoolSize = 1,
+                MaxPoolSize = 20
             };
 
             if (Port.HasValue && Port.Value != NpgsqlConnection.DefaultPort)

@@ -115,7 +115,7 @@ namespace MassTransit.SqlTransport.Middleware
                 try
                 {
                     var delayTask = _receiveSettings.QueueId.HasValue
-                        ? _client.ConnectionContext.DelayUntilMessageReady(_receiveSettings.QueueId.Value, _receiveSettings.PollingInterval,
+                        ? _client.ConnectionContext.DelayUntilMessageReady(_receiveSettings.QueueId.Value,_receiveSettings.QueueName, _receiveSettings.PollingInterval,
                             cancellationToken)
                         : Task.Delay(_receiveSettings.PollingInterval, cancellationToken);
 

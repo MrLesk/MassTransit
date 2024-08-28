@@ -37,12 +37,14 @@ namespace MassTransit.SqlTransport
             return _context.CreateConnection(cancellationToken);
         }
 
-        public Task DelayUntilMessageReady(long queueId, TimeSpan timeout, CancellationToken cancellationToken)
+        public Task DelayUntilMessageReady(long queueId, string queueName, TimeSpan timeout,
+            CancellationToken cancellationToken)
         {
-            return _context.DelayUntilMessageReady(queueId, timeout, cancellationToken);
+            return _context.DelayUntilMessageReady(queueId, queueName, timeout, cancellationToken);
         }
 
-        public Task<T> Query<T>(Func<IDbConnection, IDbTransaction, Task<T>> callback, CancellationToken cancellationToken)
+        public Task<T> Query<T>(Func<IDbConnection, IDbTransaction, Task<T>> callback,
+            CancellationToken cancellationToken)
         {
             return _context.Query(callback, cancellationToken);
         }

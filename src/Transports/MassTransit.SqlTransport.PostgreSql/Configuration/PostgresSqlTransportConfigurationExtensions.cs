@@ -31,7 +31,6 @@ namespace MassTransit
                     options.CreateDatabase = true;
                     options.CreateInfrastructure = true;
                     options.DeleteDatabase = false;
-
                     configure?.Invoke(options);
                 });
             services.AddHostedService<SqlTransportMigrationHostedService>();

@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 namespace MassTransit.SqlTransport.PostgreSql
 {
     using System;
@@ -27,7 +29,9 @@ namespace MassTransit.SqlTransport.PostgreSql
         readonly string _processMetricsSql;
         readonly string _publishSql;
         readonly string _purgeQueueSql;
+
         readonly string _receivePartitionedSql;
+
         readonly string _receiveSql;
         readonly string _renewLockSql;
         readonly string _sendSql;
@@ -58,7 +62,9 @@ namespace MassTransit.SqlTransport.PostgreSql
 
         public override Task<long> CreateQueue(Queue queue)
         {
-            return _context.Query((x, t) => x.ExecuteScalarAsync<long>(_createQueueSql, new
+            var sqlCommand = AddSqlTracingInformation(_createQueueSql);
+
+            return _context.Query((x, t) => x.ExecuteScalarAsync<long>(sqlCommand, new
             {
                 queue_name = queue.QueueName,
                 auto_delete = (int?)queue.AutoDeleteOnIdle?.TotalSeconds
@@ -67,12 +73,18 @@ namespace MassTransit.SqlTransport.PostgreSql
 
         public override Task<long> CreateTopic(Topic topic)
         {
-            return _context.Query((x, t) => x.ExecuteScalarAsync<long>(_createTopicSql, new { topic_name = topic.TopicName }), CancellationToken);
+            var sqlCommand = AddSqlTracingInformation(_createTopicSql);
+
+            return _context.Query(
+                (x, t) => x.ExecuteScalarAsync<long>(sqlCommand, new { topic_name = topic.TopicName }),
+                CancellationToken);
         }
 
         public override Task<long> CreateTopicSubscription(TopicToTopicSubscription subscription)
         {
-            return _context.Query((x, t) => x.ExecuteScalarAsync<long>(_createTopicSubscriptionSql, new
+            var sqlCommand = AddSqlTracingInformation(_createTopicSubscriptionSql);
+
+            return _context.Query((x, t) => x.ExecuteScalarAsync<long>(sqlCommand, new
             {
                 source_topic_name = subscription.Source.TopicName,
                 destination_topic_name = subscription.Destination.TopicName,
@@ -84,7 +96,9 @@ namespace MassTransit.SqlTransport.PostgreSql
 
         public override Task<long> CreateQueueSubscription(TopicToQueueSubscription subscription)
         {
-            return _context.Query((x, t) => x.ExecuteScalarAsync<long>(_createQueueSubscriptionSql, new
+            var sqlCommand = AddSqlTracingInformation(_createQueueSubscriptionSql);
+
+            return _context.Query((x, t) => x.ExecuteScalarAsync<long>(sqlCommand, new
             {
                 source_topic_name = subscription.Source.TopicName,
                 destination_queue_name = subscription.Destination.QueueName,
@@ -96,17 +110,23 @@ namespace MassTransit.SqlTransport.PostgreSql
 
         public override Task<long> PurgeQueue(string queueName, CancellationToken cancellationToken)
         {
-            return _context.Query((x, t) => x.ExecuteScalarAsync<long>(_purgeQueueSql, new { queue_name = queueName }), CancellationToken);
+            var sqlCommand = AddSqlTracingInformation(_purgeQueueSql);
+
+            return _context.Query((x, t) => x.ExecuteScalarAsync<long>(sqlCommand, new { queue_name = queueName }),
+                CancellationToken);
         }
 
-        public override async Task<IEnumerable<SqlTransportMessage>> ReceiveMessages(string queueName, SqlReceiveMode mode, int messageLimit,
+        public override async Task<IEnumerable<SqlTransportMessage>> ReceiveMessages(string queueName,
+            SqlReceiveMode mode, int messageLimit,
             int concurrentLimit, TimeSpan lockDuration)
         {
             try
             {
                 if (mode == SqlReceiveMode.Normal)
                 {
-                    return await _context.Query((x, t) => x.QueryAsync<SqlTransportMessage>(_receiveSql, new
+                    var sqlCommand = AddSqlTracingInformation(_receiveSql);
+
+                    return await _context.Query((x, t) => x.QueryAsync<SqlTransportMessage>(sqlCommand, new
                     {
                         queue_name = queueName,
                         fetch_consumer_id = _consumerId,
@@ -115,24 +135,28 @@ namespace MassTransit.SqlTransport.PostgreSql
                         fetch_count = messageLimit
                     }), CancellationToken).ConfigureAwait(false);
                 }
-
-                var ordered = mode switch
+                else
                 {
-                    SqlReceiveMode.PartitionedOrdered => 1,
-                    SqlReceiveMode.PartitionedOrderedConcurrent => 1,
-                    _ => 0
-                };
+                    var ordered = mode switch
+                    {
+                        SqlReceiveMode.PartitionedOrdered => 1,
+                        SqlReceiveMode.PartitionedOrderedConcurrent => 1,
+                        _ => 0
+                    };
 
-                return await _context.Query((x, t) => x.QueryAsync<SqlTransportMessage>(_receivePartitionedSql, new
-                {
-                    queue_name = queueName,
-                    fetch_consumer_id = _consumerId,
-                    fetch_lock_id = NewId.NextGuid(),
-                    lock_duration = lockDuration,
-                    fetch_count = messageLimit,
-                    concurrent_count = concurrentLimit,
-                    ordered
-                }), CancellationToken).ConfigureAwait(false);
+                    var sqlCommand = AddSqlTracingInformation(_receivePartitionedSql);
+
+                    return await _context.Query((x, t) => x.QueryAsync<SqlTransportMessage>(sqlCommand, new
+                    {
+                        queue_name = queueName,
+                        fetch_consumer_id = _consumerId,
+                        fetch_lock_id = NewId.NextGuid(),
+                        lock_duration = lockDuration,
+                        fetch_count = messageLimit,
+                        concurrent_count = concurrentLimit,
+                        ordered
+                    }), CancellationToken).ConfigureAwait(false);
+                }
             }
             catch (PostgresException exception) when (exception.ErrorCode == 40001)
             {
@@ -143,11 +167,17 @@ namespace MassTransit.SqlTransport.PostgreSql
         public override Task Send<T>(string queueName, SqlMessageSendContext<T> context)
         {
             IEnumerable<KeyValuePair<string, object>> headers = context.Headers.GetAll().ToList();
-            var headersAsJson = headers.Any() ? JsonSerializer.Serialize(headers, SystemTextJsonMessageSerializer.Options) : null;
+            var headersAsJson = headers.Any()
+                ? JsonSerializer.Serialize(headers, SystemTextJsonMessageSerializer.Options)
+                : null;
 
             Guid? schedulingTokenId = context.Headers.Get<Guid>(MessageHeaders.SchedulingTokenId);
 
-            return _context.Query((x, t) => x.ExecuteScalarAsync<long?>(_sendSql, new
+            var sqlCommand = AddSqlTracingInformation(_sendSql);
+
+            Console.WriteLine($"Sending message to {queueName} at sent time {context.SentTime} with delay {context.Delay}");
+
+            return _context.Query((x, t) => x.ExecuteScalarAsync<long?>(sqlCommand, new
             {
                 entity_name = queueName,
                 priority = (int)(context.Priority ?? 100),
@@ -178,11 +208,17 @@ namespace MassTransit.SqlTransport.PostgreSql
         public override Task Publish<T>(string topicName, SqlMessageSendContext<T> context)
         {
             IEnumerable<KeyValuePair<string, object>> headers = context.Headers.GetAll().ToList();
-            var headersAsJson = headers.Any() ? JsonSerializer.Serialize(headers, SystemTextJsonMessageSerializer.Options) : null;
+            var headersAsJson = headers.Any()
+                ? JsonSerializer.Serialize(headers, SystemTextJsonMessageSerializer.Options)
+                : null;
 
             Guid? schedulingTokenId = context.Headers.Get<Guid>(MessageHeaders.SchedulingTokenId);
 
-            return _context.Query((x, t) => x.ExecuteScalarAsync<long?>(_publishSql, new
+            var sqlCommand = AddSqlTracingInformation(_publishSql);
+
+            Console.WriteLine($"Publishing message to {topicName} at sent time {context.SentTime} with delay {context.Delay}");
+
+            return _context.Query((x, t) => x.ExecuteScalarAsync<long?>(sqlCommand, new
             {
                 entity_name = topicName,
                 priority = (int)(context.Priority ?? 100),
@@ -212,7 +248,9 @@ namespace MassTransit.SqlTransport.PostgreSql
 
         public override async Task<bool> DeleteMessage(Guid lockId, long messageDeliveryId)
         {
-            var result = await _context.Query((x, t) => x.ExecuteScalarAsync<long?>(_deleteMessageSql, new
+            var sqlCommand = AddSqlTracingInformation(_deleteMessageSql);
+
+            var result = await _context.Query((x, t) => x.ExecuteScalarAsync<long?>(sqlCommand, new
             {
                 message_delivery_id = messageDeliveryId,
                 lock_id = lockId
@@ -223,20 +261,28 @@ namespace MassTransit.SqlTransport.PostgreSql
 
         public override async Task<bool> DeleteScheduledMessage(Guid tokenId, CancellationToken cancellationToken)
         {
-            IEnumerable<SqlTransportMessage>? result = await _context.Query((x, t) => x.QueryAsync<SqlTransportMessage>(_deleteScheduledMessageSql, new
-            {
-                token_id = tokenId,
-            }), cancellationToken);
+            var sqlCommand = AddSqlTracingInformation(_deleteScheduledMessageSql);
+
+            IEnumerable<SqlTransportMessage>? result = await _context.Query((x, t) => x.QueryAsync<SqlTransportMessage>(
+                sqlCommand, new
+                {
+                    token_id = tokenId,
+                }), cancellationToken);
 
             return result.Any();
         }
 
-        public override async Task<bool> MoveMessage(Guid lockId, long messageDeliveryId, string queueName, SqlQueueType queueType, SendHeaders sendHeaders)
+        public override async Task<bool> MoveMessage(Guid lockId, long messageDeliveryId, string queueName,
+            SqlQueueType queueType, SendHeaders sendHeaders)
         {
             IEnumerable<KeyValuePair<string, object>> headers = sendHeaders.GetAll().ToList();
-            var headersAsJson = headers.Any() ? JsonSerializer.Serialize(headers, SystemTextJsonMessageSerializer.Options) : null;
+            var headersAsJson = headers.Any()
+                ? JsonSerializer.Serialize(headers, SystemTextJsonMessageSerializer.Options)
+                : null;
 
-            var result = await _context.Query((x, t) => x.ExecuteScalarAsync<long?>(_moveMessageTypeSql, new
+            var sqlCommand = AddSqlTracingInformation(_moveMessageTypeSql);
+
+            var result = await _context.Query((x, t) => x.ExecuteScalarAsync<long?>(sqlCommand, new
             {
                 message_delivery_id = messageDeliveryId,
                 lock_id = lockId,
@@ -250,7 +296,9 @@ namespace MassTransit.SqlTransport.PostgreSql
 
         public override async Task<bool> RenewLock(Guid lockId, long messageDeliveryId, TimeSpan duration)
         {
-            var result = await _context.Query((x, t) => x.ExecuteScalarAsync<long?>(_renewLockSql, new
+            var sqlCommand = AddSqlTracingInformation(_renewLockSql);
+
+            var result = await _context.Query((x, t) => x.ExecuteScalarAsync<long?>(sqlCommand, new
             {
                 message_delivery_id = messageDeliveryId,
                 lock_id = lockId,
@@ -260,12 +308,17 @@ namespace MassTransit.SqlTransport.PostgreSql
             return result == messageDeliveryId;
         }
 
-        public override async Task<bool> Unlock(Guid lockId, long messageDeliveryId, TimeSpan delay, SendHeaders sendHeaders)
+        public override async Task<bool> Unlock(Guid lockId, long messageDeliveryId, TimeSpan delay,
+            SendHeaders sendHeaders)
         {
             IEnumerable<KeyValuePair<string, object>> headers = sendHeaders.GetAll().ToList();
-            var headersAsJson = headers.Any() ? JsonSerializer.Serialize(headers, SystemTextJsonMessageSerializer.Options) : null;
+            var headersAsJson = headers.Any()
+                ? JsonSerializer.Serialize(headers, SystemTextJsonMessageSerializer.Options)
+                : null;
 
-            var result = await _context.Query((x, t) => x.ExecuteScalarAsync<long?>(_unlockSql, new
+            var sqlCommand = AddSqlTracingInformation(_unlockSql);
+
+            var result = await _context.Query((x, t) => x.ExecuteScalarAsync<long?>(sqlCommand, new
             {
                 message_delivery_id = messageDeliveryId,
                 lock_id = lockId,
@@ -274,6 +327,43 @@ namespace MassTransit.SqlTransport.PostgreSql
             }), CancellationToken);
 
             return result == messageDeliveryId;
+        }
+
+        private string AddSqlTracingInformation(string sqlCommand)
+        {
+            // Retrieve the current span context
+            var currentSpan = Activity.Current;
+
+            if (currentSpan != null)
+            {
+
+                // Extract the traceparent string
+                var traceparent =
+                    $"traceparent=''00-{currentSpan.TraceId.ToHexString()}-{currentSpan.SpanId.ToHexString()}-{(currentSpan.Recorded ? "01" : "00")}''";
+
+                // var command = @$"
+                //     BEGIN;
+                //     SET LOCAL pg_tracing.trace_context='{traceparent}';
+                //     {sqlCommand}
+                //     COMMIT;
+                // ";
+                var command = $"SET LOCAL pg_tracing.trace_context='{traceparent}'; {sqlCommand}";
+
+                Console.WriteLine($"\n---------MT ({currentSpan.OperationName}): {traceparent}---------");
+                Console.WriteLine($"TraceId: {currentSpan.TraceId.ToHexString()}");
+                Console.WriteLine($"SpanId: {currentSpan.SpanId.ToHexString()}");
+                Console.WriteLine($"Recorded: {currentSpan.Recorded}");
+                Console.WriteLine($"ParentId: {currentSpan.ParentId}");
+                Console.WriteLine($"ParentSpanId: {currentSpan.ParentSpanId.ToHexString()}");
+                Console.WriteLine("---------------------------------------------------------------------------------------------------\n");
+
+                // Wrap the SQL command with tracing context
+                return command;
+            }
+
+
+            // Return the original SQL command if there's no active span
+            return sqlCommand;
         }
     }
 }

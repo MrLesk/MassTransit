@@ -25,7 +25,8 @@ namespace MassTransit.SqlTransport
         /// <returns></returns>
         Task<ISqlTransportConnection> CreateConnection(CancellationToken cancellationToken);
 
-        Task DelayUntilMessageReady(long queueId, TimeSpan timeout, CancellationToken cancellationToken);
+        Task DelayUntilMessageReady(long queueId, string queueName, TimeSpan timeout,
+            CancellationToken cancellationToken);
 
         /// <summary>
         /// Executes a query within a transaction using an available connection

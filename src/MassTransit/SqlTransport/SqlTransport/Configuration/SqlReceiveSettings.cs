@@ -15,7 +15,7 @@ namespace MassTransit.SqlTransport.Configuration
         {
             _configuration = configuration;
 
-            PollingInterval = TimeSpan.FromSeconds(1);
+            PollingInterval = TimeSpan.FromSeconds(3600);
             ConcurrentDeliveryLimit = 1;
 
             LockDuration = TimeSpan.FromMinutes(1);

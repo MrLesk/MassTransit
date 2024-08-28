@@ -34,13 +34,14 @@ namespace MassTransit.SqlTransport.PostgreSql
             SqlMapper.AddTypeHandler(new UriTypeHandler());
         }
 
-        public PostgresDbConnectionContext(ISqlHostConfiguration hostConfiguration, ITransportSupervisor<ConnectionContext> supervisor)
+        public PostgresDbConnectionContext(ISqlHostConfiguration hostConfiguration,
+            ITransportSupervisor<ConnectionContext> supervisor)
             : base(supervisor.Stopped)
         {
             _hostConfiguration = hostConfiguration;
 
             _hostSettings = hostConfiguration.Settings as PostgresSqlHostSettings
-                ?? throw new ConfigurationException("The host settings were not of the expected type");
+                            ?? throw new ConfigurationException("The host settings were not of the expected type");
 
             _retryPolicy = Retry.CreatePolicy(x => x.Immediate(10).Handle<PostgresException>(ex => ex.IsTransient));
 
@@ -72,7 +73,8 @@ namespace MassTransit.SqlTransport.PostgreSql
             return await CreateConnection(cancellationToken).ConfigureAwait(false);
         }
 
-        public Task<T> Query<T>(Func<IDbConnection, IDbTransaction, Task<T>> callback, CancellationToken cancellationToken)
+        public Task<T> Query<T>(Func<IDbConnection, IDbTransaction, Task<T>> callback,
+            CancellationToken cancellationToken)
         {
             return _executor.Run(async () =>
             {
@@ -80,12 +82,14 @@ namespace MassTransit.SqlTransport.PostgreSql
 
                 return await _retryPolicy.Retry(async () =>
                 {
-                #if NET6_0_OR_GREATER || NETSTANDARD2_1_OR_GREATER
-                    await using var transaction = await connection.Connection.BeginTransactionAsync(_hostSettings.IsolationLevel, cancellationToken);
-                #else
+#if NET6_0_OR_GREATER || NETSTANDARD2_1_OR_GREATER
+                    await using var transaction =
+                        await connection.Connection.BeginTransactionAsync(_hostSettings.IsolationLevel,
+                            cancellationToken);
+#else
                 // ReSharper disable AccessToDisposedClosure
                 await using var transaction = connection.Connection.BeginTransaction(_hostSettings.IsolationLevel);
-                #endif
+#endif
 
                     var result = await callback(connection.Connection, transaction).ConfigureAwait(false);
 
@@ -96,8 +100,11 @@ namespace MassTransit.SqlTransport.PostgreSql
             }, cancellationToken);
         }
 
-        public Task DelayUntilMessageReady(long queueId, TimeSpan timeout, CancellationToken cancellationToken)
+        public Task DelayUntilMessageReady(long queueId, string queueName, TimeSpan timeout,
+            CancellationToken cancellationToken)
         {
+            _agent.AddQueueToListen(queueId,queueName);
+
             var queueToken = _agent.GetCancellationTokenForQueue(queueId);
 
             async Task WaitAsync()
@@ -137,6 +144,10 @@ namespace MassTransit.SqlTransport.PostgreSql
             readonly ISqlHostConfiguration _hostConfiguration;
             readonly ILogContext? _logContext;
             readonly ConcurrentDictionary<long, CancellationTokenSource> _notificationTokens;
+            readonly ConcurrentDictionary<long, string> _queuesToListen;
+            readonly ConcurrentDictionary<long, string> _listenedQueues;
+            NpgsqlConnection? _connection;
+            readonly string _sanitizedSchemaName;
             CancellationTokenSource _listenTokenSource;
 
             public NotificationAgent(PostgresDbConnectionContext context, ISqlHostConfiguration hostConfiguration)
@@ -146,13 +157,40 @@ namespace MassTransit.SqlTransport.PostgreSql
                 _logContext = hostConfiguration.LogContext;
 
                 _notificationTokens = new ConcurrentDictionary<long, CancellationTokenSource>();
+                _queuesToListen = new ConcurrentDictionary<long, string>();
+                _listenedQueues = new ConcurrentDictionary<long, string>();
                 _listenTokenSource = new CancellationTokenSource();
+                _sanitizedSchemaName = NotifyChannel.SanitizeSchemaName(_context.Schema);
 
                 var runTask = Task.Run(() => ListenForNotifications(), Stopping);
 
                 SetReady(runTask);
 
                 SetCompleted(runTask);
+            }
+
+            public void AddQueueToListen(long queueId,string queueName)
+            {
+                var added = _queuesToListen.TryAdd(queueId, queueName);
+
+                if (added)
+                {
+                    Console.WriteLine(
+                        $"[{DateTime.Now:yyyy-MM-ddTHH:mm:ss.fffZ}] - Adding queue {queueName} (id:{queueId}) to queues to be listened");
+                }
+                else
+                {
+                    Console.WriteLine(
+                        $"[{DateTime.Now:yyyy-MM-ddTHH:mm:ss.fffZ}] - Queue {queueName} (id:{queueId}) is already being listened");
+                }
+            }
+
+            private void AddQueueAsListened(long queueId,string queueName)
+            {
+                Console.WriteLine(
+                    $"[{DateTime.Now:yyyy-MM-ddTHH:mm:ss.fffZ}] - Listening to queue {queueName} (id:{queueId})");
+
+                _listenedQueues.TryAdd(queueId, queueName);
             }
 
             public CancellationToken GetCancellationTokenForQueue(long queueId)
@@ -191,52 +229,66 @@ namespace MassTransit.SqlTransport.PostgreSql
                 {
                     try
                     {
-                        await _hostConfiguration.Retry(async () =>
+                        await using var connection = await _context.CreateConnection(Stopping);
+                        if (_connection == null)
                         {
-                            await using var connection = await _context.CreateConnection(Stopping);
+                            _connection = connection.Connection;
+                            Console.WriteLine(
+                                $"[{DateTime.Now:yyyy-MM-ddTHH:mm:ss.fffZ}] - Established connection for listening to process {_connection.ProcessID}");
+                        }
+                        else
+                        {
+                            Console.WriteLine(
+                                $"[{DateTime.Now:yyyy-MM-ddTHH:mm:ss.fffZ}] - Setting up new connection for process {_connection.ProcessID}. Why?");
+                        }
 
-                            var queueIds = new HashSet<long>(_notificationTokens.Keys);
-                            var sanitizedSchemaName = NotifyChannel.SanitizeSchemaName(_context.Schema);
+                        connection.Connection.Notification += OnConnectionOnNotification;
 
-                            connection.Connection.Notification += OnConnectionOnNotification;
 
-                            foreach (var queueId in queueIds)
+                        while (!Stopping.IsCancellationRequested)
+                        {
+                            if (_listenTokenSource.IsCancellationRequested)
+                                _listenTokenSource = new CancellationTokenSource();
+
+
+                            Console.WriteLine(
+                                $"[{DateTime.Now:yyyy-MM-ddTHH:mm:ss.fffZ}] - I need to listen to {string.Join(", ", _queuesToListen.Keys)}");
+
+                            var tasks = new List<Task>();
+
+                            foreach (var queue in _queuesToListen)
                             {
-                                await connection.Connection.ExecuteScalarAsync<int>($"LISTEN \"{sanitizedSchemaName}_msg_{queueId}\"", Stopping)
+                                if (_listenedQueues.ContainsKey(queue.Key))
+                                {
+                                    Console.WriteLine(
+                                        $"[{DateTime.Now:yyyy-MM-ddTHH:mm:ss.fffZ}] - Skip listening to queue {queue.Value} (id:{queue.Key}) because it's already being listened");
+                                    continue;
+                                }
+
+                                var channelName = $"{_sanitizedSchemaName}_msg_{queue.Key}";
+
+                                tasks.Add(connection.Connection.ExecuteScalarAsync<int>($"LISTEN \"{channelName}\"",
+                                    Stopping).ContinueWith(_ => { AddQueueAsListened(queue.Key,queue.Value); }));
+                            }
+
+                            await Task.WhenAll(tasks).ConfigureAwait(false);
+
+                            Console.WriteLine(
+                                $"[{DateTime.Now:yyyy-MM-ddTHH:mm:ss.fffZ}] - I am listening to {string.Join(", ", _listenedQueues.Keys)}");
+
+                            try
+                            {
+                                using var linkedTokenSource =
+                                    CancellationTokenSource.CreateLinkedTokenSource(_listenTokenSource.Token,
+                                        Stopping);
+
+                                await connection.Connection.WaitAsync(linkedTokenSource.Token)
                                     .ConfigureAwait(false);
-
-                                // LogContext.Debug?.Log("LISTEN \"{sanitizedSchemaName}_msg_{queueId}\"", queueId);
                             }
-
-                            while (!Stopping.IsCancellationRequested)
+                            catch (OperationCanceledException)
                             {
-                                try
-                                {
-                                    using var linkedTokenSource = CancellationTokenSource.CreateLinkedTokenSource(_listenTokenSource.Token, Stopping);
-
-                                    await connection.Connection.WaitAsync(linkedTokenSource.Token).ConfigureAwait(false);
-                                }
-                                catch (OperationCanceledException)
-                                {
-                                }
-
-                                if (_listenTokenSource.IsCancellationRequested)
-                                    _listenTokenSource = new CancellationTokenSource();
-
-                                foreach (var queueId in _notificationTokens.Keys)
-                                {
-                                    if (queueIds.Contains(queueId))
-                                        break;
-
-                                    await connection.Connection.ExecuteScalarAsync<int>($"LISTEN \"{sanitizedSchemaName}_msg_{queueId}\"", Stopping)
-                                        .ConfigureAwait(false);
-
-                                    // LogContext.Debug?.Log("LISTEN \"{sanitizedSchemaName}_msg_{queueId}\"", queueId);
-
-                                    queueIds.Add(queueId);
-                                }
                             }
-                        }, Stopping, Stopping);
+                        }
                     }
                     catch (OperationCanceledException)
                     {
@@ -250,10 +302,13 @@ namespace MassTransit.SqlTransport.PostgreSql
 
             void OnConnectionOnNotification(object sender, NpgsqlNotificationEventArgs args)
             {
+                Console.WriteLine($"[{DateTime.Now:yyyy-MM-ddTHH:mm:ss.fffZ}] - Received notification: {args.Channel}");
+
                 LogContext.SetCurrentIfNull(_logContext);
 
                 var index = args.Channel.LastIndexOf('_');
-                if (index > 0 && long.TryParse(args.Channel.Substring(index + 1), out var queueId) && _notificationTokens.TryGetValue(queueId, out var source))
+                if (index > 0 && long.TryParse(args.Channel.Substring(index + 1), out var queueId) &&
+                    _notificationTokens.TryGetValue(queueId, out var source))
                 {
                     // LogContext.Debug?.Log("NOTIFY {Channel}", args.Channel);
                     source.Cancel();
@@ -275,11 +330,11 @@ namespace MassTransit.SqlTransport.PostgreSql
                 _hostConfiguration = hostConfiguration;
                 _logContext = hostConfiguration.LogContext;
 
-                var runTask = Task.Run(() => PerformMaintenance(), Stopping);
+                //  var runTask = Task.Run(() => PerformMaintenance(), Stopping);
 
-                SetReady(runTask);
+                //  SetReady(runTask);
 
-                SetCompleted(runTask);
+                //    SetCompleted(runTask);
             }
 
             async Task PerformMaintenance()
@@ -292,7 +347,8 @@ namespace MassTransit.SqlTransport.PostgreSql
                 var random = new Random();
 
                 var cleanupInterval = _hostConfiguration.Settings.QueueCleanupInterval
-                    + TimeSpan.FromSeconds(random.Next(0, (int)(_hostConfiguration.Settings.QueueCleanupInterval.TotalSeconds / 10)));
+                                      + TimeSpan.FromSeconds(random.Next(0,
+                                          (int)(_hostConfiguration.Settings.QueueCleanupInterval.TotalSeconds / 10)));
 
                 while (!Stopping.IsCancellationRequested)
                 {
@@ -301,7 +357,9 @@ namespace MassTransit.SqlTransport.PostgreSql
                     try
                     {
                         var maintenanceInterval = _hostConfiguration.Settings.MaintenanceInterval
-                            + TimeSpan.FromSeconds(random.Next(0, (int)(_hostConfiguration.Settings.MaintenanceInterval.TotalSeconds / 10)));
+                                                  + TimeSpan.FromSeconds(random.Next(0,
+                                                      (int)(_hostConfiguration.Settings.MaintenanceInterval
+                                                          .TotalSeconds / 10)));
 
                         try
                         {
@@ -315,7 +373,8 @@ namespace MassTransit.SqlTransport.PostgreSql
                             }), CancellationToken.None);
 
                             if (lastCleanup == null)
-                                await _context.Query((x, t) => x.ExecuteScalarAsync<long?>(purgeTopologySql), CancellationToken.None);
+                                await _context.Query((x, t) => x.ExecuteScalarAsync<long?>(purgeTopologySql),
+                                    CancellationToken.None);
                         }
 
                         await _hostConfiguration.Retry(async () =>
@@ -331,7 +390,9 @@ namespace MassTransit.SqlTransport.PostgreSql
 
                                 lastCleanup = DateTime.UtcNow;
                                 cleanupInterval = _hostConfiguration.Settings.QueueCleanupInterval
-                                    + TimeSpan.FromSeconds(random.Next(0, (int)(_hostConfiguration.Settings.QueueCleanupInterval.TotalSeconds / 10)));
+                                                  + TimeSpan.FromSeconds(random.Next(0,
+                                                      (int)(_hostConfiguration.Settings.QueueCleanupInterval
+                                                          .TotalSeconds / 10)));
                             }
                         }, Stopping, Stopping);
                     }
