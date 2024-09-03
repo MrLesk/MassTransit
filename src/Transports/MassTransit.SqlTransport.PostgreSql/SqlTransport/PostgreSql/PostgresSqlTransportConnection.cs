@@ -108,10 +108,14 @@ namespace MassTransit.SqlTransport.PostgreSql
             if (string.IsNullOrWhiteSpace(options.Role))
                 options.Role = "transport";
 
-            builder.KeepAlive = 10;
+          /*  builder.KeepAlive = 10;
             builder.TcpKeepAlive = true;
             builder.TcpKeepAliveInterval = 10;
-            builder.TcpKeepAliveTime = 10;
+            builder.TcpKeepAliveTime = 10;*/
+            builder.Pooling = false;
+          /*  builder.MinPoolSize = 1;
+            builder.MaxPoolSize = 20;*/
+            builder.ApplicationName = Environment.MachineName;
 
             return builder;
         }

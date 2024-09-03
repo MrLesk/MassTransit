@@ -73,11 +73,7 @@ namespace MassTransit.SqlTransport.PostgreSql
                 Host = MultipleHosts ?? Host,
                 Username = Username,
                 Password = Password,
-                Database = Database,
-                KeepAlive = 5,
-                Pooling = true,
-                MinPoolSize = 1,
-                MaxPoolSize = 20
+                Database = Database
             };
 
             if (Port.HasValue && Port.Value != NpgsqlConnection.DefaultPort)

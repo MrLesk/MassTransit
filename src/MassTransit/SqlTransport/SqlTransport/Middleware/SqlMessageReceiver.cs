@@ -53,7 +53,8 @@ namespace MassTransit.SqlTransport.Middleware
             {
                 PrefetchCount = _receiveSettings.PrefetchCount,
                 ConcurrentResultLimit = _context.ConcurrentMessageLimit ?? _context.PrefetchCount,
-                RequestResultLimit = _receiveSettings.PrefetchCount
+                RequestResultLimit = _receiveSettings.PrefetchCount,
+                RequestCancellationTimeout = TimeSpan.FromSeconds(10)
             });
 
             SetReady();

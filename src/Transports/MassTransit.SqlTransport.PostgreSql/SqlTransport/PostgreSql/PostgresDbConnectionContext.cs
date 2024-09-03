@@ -103,7 +103,7 @@ namespace MassTransit.SqlTransport.PostgreSql
         public Task DelayUntilMessageReady(long queueId, string queueName, TimeSpan timeout,
             CancellationToken cancellationToken)
         {
-            _agent.AddQueueToListen(queueId,queueName);
+            _agent.AddQueueToListen(queueId, queueName);
 
             var queueToken = _agent.GetCancellationTokenForQueue(queueId);
 
@@ -169,7 +169,7 @@ namespace MassTransit.SqlTransport.PostgreSql
                 SetCompleted(runTask);
             }
 
-            public void AddQueueToListen(long queueId,string queueName)
+            public void AddQueueToListen(long queueId, string queueName)
             {
                 var added = _queuesToListen.TryAdd(queueId, queueName);
 
@@ -185,7 +185,7 @@ namespace MassTransit.SqlTransport.PostgreSql
                 }
             }
 
-            private void AddQueueAsListened(long queueId,string queueName)
+            private void AddQueueAsListened(long queueId, string queueName)
             {
                 Console.WriteLine(
                     $"[{DateTime.Now:yyyy-MM-ddTHH:mm:ss.fffZ}] - Listening to queue {queueName} (id:{queueId})");
@@ -230,6 +230,12 @@ namespace MassTransit.SqlTransport.PostgreSql
                     try
                     {
                         await using var connection = await _context.CreateConnection(Stopping);
+                        connection.Connection.StateChange += (sender, args) =>
+                        {
+                            Console.WriteLine(
+                                $"[{DateTime.Now:yyyy-MM-ddTHH:mm:ss.fffZ}] - Connection state changed to {args.CurrentState}");
+                        };
+
                         if (_connection == null)
                         {
                             _connection = connection.Connection;
@@ -243,7 +249,11 @@ namespace MassTransit.SqlTransport.PostgreSql
                         }
 
                         connection.Connection.Notification += OnConnectionOnNotification;
-
+                        connection.Connection.Notice += (sender, args) =>
+                        {
+                            Console.WriteLine(
+                                $"[{DateTime.Now:yyyy-MM-ddTHH:mm:ss.fffZ}] - NOTICE: {args.Notice.MessageText}");
+                        };
 
                         while (!Stopping.IsCancellationRequested)
                         {
@@ -254,24 +264,21 @@ namespace MassTransit.SqlTransport.PostgreSql
                             Console.WriteLine(
                                 $"[{DateTime.Now:yyyy-MM-ddTHH:mm:ss.fffZ}] - I need to listen to {string.Join(", ", _queuesToListen.Keys)}");
 
-                            var tasks = new List<Task>();
-
                             foreach (var queue in _queuesToListen)
                             {
                                 if (_listenedQueues.ContainsKey(queue.Key))
                                 {
                                     Console.WriteLine(
-                                        $"[{DateTime.Now:yyyy-MM-ddTHH:mm:ss.fffZ}] - Skip listening to queue {queue.Value} (id:{queue.Key}) because it's already being listened");
-                                    continue;
+                                        $"[{DateTime.Now:yyyy-MM-ddTHH:mm:ss.fffZ}] - I already listen to queue {queue.Value} (id:{queue.Key}) but I will register a listen anyways");
+                                    //continue;
                                 }
 
                                 var channelName = $"{_sanitizedSchemaName}_msg_{queue.Key}";
 
-                                tasks.Add(connection.Connection.ExecuteScalarAsync<int>($"LISTEN \"{channelName}\"",
-                                    Stopping).ContinueWith(_ => { AddQueueAsListened(queue.Key,queue.Value); }));
+                                await connection.Connection.ExecuteScalarAsync<int>($"LISTEN \"{channelName}\"",
+                                    Stopping);
+                                AddQueueAsListened(queue.Key, queue.Value);
                             }
-
-                            await Task.WhenAll(tasks).ConfigureAwait(false);
 
                             Console.WriteLine(
                                 $"[{DateTime.Now:yyyy-MM-ddTHH:mm:ss.fffZ}] - I am listening to {string.Join(", ", _listenedQueues.Keys)}");
@@ -281,6 +288,7 @@ namespace MassTransit.SqlTransport.PostgreSql
                                 using var linkedTokenSource =
                                     CancellationTokenSource.CreateLinkedTokenSource(_listenTokenSource.Token,
                                         Stopping);
+
 
                                 await connection.Connection.WaitAsync(linkedTokenSource.Token)
                                     .ConfigureAwait(false);
@@ -302,14 +310,15 @@ namespace MassTransit.SqlTransport.PostgreSql
 
             void OnConnectionOnNotification(object sender, NpgsqlNotificationEventArgs args)
             {
-                Console.WriteLine($"[{DateTime.Now:yyyy-MM-ddTHH:mm:ss.fffZ}] - Received notification: {args.Channel}");
-
                 LogContext.SetCurrentIfNull(_logContext);
 
                 var index = args.Channel.LastIndexOf('_');
                 if (index > 0 && long.TryParse(args.Channel.Substring(index + 1), out var queueId) &&
                     _notificationTokens.TryGetValue(queueId, out var source))
                 {
+                    var queue = _listenedQueues[queueId];
+                    Console.WriteLine(
+                        $"[{DateTime.Now:yyyy-MM-ddTHH:mm:ss.fffZ}] - ------!!!!!----- Received notification for queue {queue} (id:{queueId})");
                     // LogContext.Debug?.Log("NOTIFY {Channel}", args.Channel);
                     source.Cancel();
                 }

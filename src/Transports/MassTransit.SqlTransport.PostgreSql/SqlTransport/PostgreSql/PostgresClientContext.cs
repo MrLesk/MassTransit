@@ -218,7 +218,7 @@ namespace MassTransit.SqlTransport.PostgreSql
 
             Console.WriteLine($"Publishing message to {topicName} at sent time {context.SentTime} with delay {context.Delay}");
 
-            return _context.Query((x, t) => x.ExecuteScalarAsync<long?>(sqlCommand, new
+            var msg = new
             {
                 entity_name = topicName,
                 priority = (int)(context.Priority ?? 100),
@@ -243,7 +243,11 @@ namespace MassTransit.SqlTransport.PostgreSql
                 routing_key = context.RoutingKey,
                 delay = context.Delay,
                 scheduling_token_id = schedulingTokenId
-            }), CancellationToken);
+            };
+
+            var msgString = JsonSerializer.Serialize(msg);
+
+            return _context.Query((x, t) => x.ExecuteScalarAsync<long?>(sqlCommand,msg ), CancellationToken);
         }
 
         public override async Task<bool> DeleteMessage(Guid lockId, long messageDeliveryId)
@@ -338,8 +342,7 @@ namespace MassTransit.SqlTransport.PostgreSql
             {
 
                 // Extract the traceparent string
-                var traceparent =
-                    $"traceparent=''00-{currentSpan.TraceId.ToHexString()}-{currentSpan.SpanId.ToHexString()}-{(currentSpan.Recorded ? "01" : "00")}''";
+               // var traceparent = $"traceparent=''00-{currentSpan.TraceId.ToHexString()}-{currentSpan.SpanId.ToHexString()}-{(currentSpan.Recorded ? "01" : "00")}''";
 
                 // var command = @$"
                 //     BEGIN;
@@ -347,16 +350,26 @@ namespace MassTransit.SqlTransport.PostgreSql
                 //     {sqlCommand}
                 //     COMMIT;
                 // ";
-                var command = $"SET LOCAL pg_tracing.trace_context='{traceparent}'; {sqlCommand}";
+                //var command = $"SET LOCAL pg_tracing.trace_context='{traceparent}'; {sqlCommand}";
 
-                Console.WriteLine($"\n---------MT ({currentSpan.OperationName}): {traceparent}---------");
+                var traceId = currentSpan.TraceId.ToString();
+                var spanId = currentSpan.SpanId.ToString();
+                var traceFlags = currentSpan.ActivityTraceFlags.HasFlag(ActivityTraceFlags.Recorded) ? "01" : "00";
+
+                // Format according to W3C trace-context specification
+                var traceContext = $"00-{traceId}-{spanId}-{traceFlags}";
+
+                var command = $"/*traceparent='{traceContext}'*/ {sqlCommand}";
+
+
+               /* Console.WriteLine($"\n---------MT ({currentSpan.OperationName}): {traceContext}---------");
                 Console.WriteLine($"TraceId: {currentSpan.TraceId.ToHexString()}");
                 Console.WriteLine($"SpanId: {currentSpan.SpanId.ToHexString()}");
                 Console.WriteLine($"Recorded: {currentSpan.Recorded}");
                 Console.WriteLine($"ParentId: {currentSpan.ParentId}");
                 Console.WriteLine($"ParentSpanId: {currentSpan.ParentSpanId.ToHexString()}");
                 Console.WriteLine("---------------------------------------------------------------------------------------------------\n");
-
+*/
                 // Wrap the SQL command with tracing context
                 return command;
             }
